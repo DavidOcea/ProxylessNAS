@@ -9,6 +9,8 @@ from modules.mix_op import *
 from models.normal_nets.proxyless_nets import *
 from utils import LatencyEstimator
 
+import torch.nn as nn
+
 
 class SuperProxylessNASNets(ProxylessNASNets):
 
@@ -67,8 +69,12 @@ class SuperProxylessNASNets(ProxylessNASNets):
         feature_mix_layer = ConvLayer(
             input_channel, last_channel, kernel_size=1, use_bn=True, act_func='relu6', ops_order='weight_bn_act',
         )
+        
+        if n_classes is not None:
+            self.num_tasks = len(n_classes)
+            classifier = nn.ModuleList([LinearLayer(last_channel, n_classes[k], dropout_rate=dropout_rate) for k in range(self.num_tasks)])
 
-        classifier = LinearLayer(last_channel, n_classes, dropout_rate=dropout_rate)
+        # classifier = LinearLayer(last_channel, n_classes, dropout_rate=dropout_rate)
         super(SuperProxylessNASNets, self).__init__(first_conv, blocks, feature_mix_layer, classifier)
 
         # set bn param
@@ -194,9 +200,9 @@ class SuperProxylessNASNets(ProxylessNASNets):
             'Conv_1', [7, 7, self.feature_mix_layer.in_channels], [7, 7, self.feature_mix_layer.out_channels]
         )
         # classifier
-        expected_latency += latency_model.predict(
-            'Logits', [7, 7, self.classifier.in_features], [self.classifier.out_features]  # 1000
-        )
+        expected_latency = [expected_latency + latency_model.predict(
+            'Logits', [7, 7, self.classifier[i].in_features], [self.classifier[i].out_features]  
+        ) for i in self.num_tasks]
         # blocks
         fsize = 112
         for block in self.blocks:
@@ -214,7 +220,7 @@ class SuperProxylessNASNets(ProxylessNASNets):
                         'expanded_conv', [fsize, fsize, mb_conv.in_channels], [out_fz, out_fz, mb_conv.out_channels],
                         expand=mb_conv.expand_ratio, kernel=mb_conv.kernel_size, stride=mb_conv.stride, idskip=idskip
                     )
-                    expected_latency = expected_latency + op_latency
+                    expected_latency = [expected_latency[i] + op_latency for i in self.num_tasks]
                     fsize = out_fz
                 continue
 
@@ -228,7 +234,7 @@ class SuperProxylessNASNets(ProxylessNASNets):
                     'expanded_conv', [fsize, fsize, op.in_channels], [out_fsize, out_fsize, op.out_channels],
                     expand=op.expand_ratio, kernel=op.kernel_size, stride=op.stride, idskip=idskip
                 )
-                expected_latency = expected_latency + op_latency * probs_over_ops[i]
+                expected_latency = [expected_latency[k] + op_latency * probs_over_ops[i] for k in self.num_tasks]
             fsize = out_fsize
         return expected_latency
 
@@ -264,8 +270,8 @@ class SuperProxylessNASNets(ProxylessNASNets):
         # classifier
         x = self.global_avg_pooling(x)
         x = x.view(x.size(0), -1)  # flatten
-        delta_flop, x = self.classifier.get_flops(x)
-        expected_flops = expected_flops + delta_flop
+        delta_flop_x = [self.classifier[k].get_flops(x) for k in self.num_tasks]
+        expected_flops = [expected_flops + delta_flop_x[k][0] for k in self.num_tasks]
         return expected_flops
 
     def convert_to_normal_net(self):

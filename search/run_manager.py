@@ -22,7 +22,7 @@ class RunConfig:
     def __init__(self, n_epochs, init_lr, lr_schedule_type, lr_schedule_param,
                  dataset, train_batch_size, test_batch_size, valid_size,
                  opt_type, opt_param, weight_decay, label_smoothing, no_decay_keys,
-                 model_init, init_div_groups, validation_frequency, print_frequency):
+                 model_init, init_div_groups, validation_frequency, print_frequency, loss_weight):
         self.n_epochs = n_epochs
         self.init_lr = init_lr
         self.lr_schedule_type = lr_schedule_type
@@ -46,6 +46,8 @@ class RunConfig:
 
         self._data_provider = None
         self._train_iter, self._valid_iter, self._test_iter = None, None, None
+
+        self.loss_weight = loss_weight
 
     @property
     def config(self):
@@ -87,6 +89,9 @@ class RunConfig:
         if self._data_provider is None:
             if self.dataset == 'imagenet':
                 from data_providers.imagenet import ImagenetDataProvider
+                self._data_provider = ImagenetDataProvider(**self.data_config)
+            elif self.dataset == 'wm_data':
+                from data_providers.wm_data import ImagenetDataProvider
                 self._data_provider = ImagenetDataProvider(**self.data_config)
             else:
                 raise ValueError('do not support: %s' % self.dataset)
@@ -349,8 +354,8 @@ class RunManager:
         # flops
         flops = self.net_flops()
         if self.out_log:
-            print('Total FLOPs: %.1fM' % (flops / 1e6))
-        net_info['flops'] = '%.1fM' % (flops / 1e6)
+            [print('Total FLOPs[',k,']: %.1fM' % (flops[k] / 1e6)) for k in range(len(flops))]
+        net_info['flops'] = ['%.1fM' % (flops[k] / 1e6) for k in range(len(flops))]
 
         # latency
         latency_types = [] if measure_latency is None else measure_latency.split('#')
@@ -457,6 +462,8 @@ class RunManager:
             print(log_str)
 
     def validate(self, is_test=True, net=None, use_train_mode=False, return_top5=False):
+        n_classes=[td.num_class for td in self.run_config.data_provider.train_dataset]
+        ngpu = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
         if is_test:
             data_loader = self.run_config.test_loader
         else:
@@ -470,44 +477,58 @@ class RunManager:
         else:
             net.eval()
         batch_time = AverageMeter()
-        losses = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
+        losses = [AverageMeter() for k in range(len(n_classes))]
+        top1 = [AverageMeter() for k in range(len(n_classes))]
 
         end = time.time()
         # noinspection PyUnresolvedReferences
         with torch.no_grad():
-            for i, (images, labels) in enumerate(data_loader):
-                images, labels = images.to(self.device), labels.to(self.device)
+            for i,all_in in enumerate(zip(*data_loader)):
+                inputs, target = zip(*[all_in[k] for k in range(len(n_classes))])
+                slice_pt = 0
+                slice_idx = [0]
+                for l in [p.size(0) for p in inputs]:
+                    slice_pt += l // ngpu
+                    slice_idx.append(slice_pt)
+                organized_input = []
+                organized_target = []
+                for ng in range(ngpu):
+                    for t in range(len(inputs)):
+                        bs = self.run_config.train_batch_size[t] // ngpu
+                        organized_input.append(inputs[t][ng * bs : (ng + 1) * bs, ...])
+                        organized_target.append(target[t][ng * bs : (ng + 1) * bs, ...])
+                inputs = torch.cat(organized_input, dim=0)
+                target = torch.cat(organized_target, dim=0)
+                images, labels = inputs.to(self.device), target.to(self.device)
+                target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
+
                 # compute output
-                output = net(images)
-                loss = self.criterion(output, labels)
+                output = net(images, slice_idx)
+                loss = [self.criterion(op, lb) for op, lb in zip(output, target_slice)]
                 # measure accuracy and record loss
-                acc1, acc5 = accuracy(output, labels, topk=(1, 5))
-                losses.update(loss, images.size(0))
-                top1.update(acc1[0], images.size(0))
-                top5.update(acc5[0], images.size(0))
+                acc = [accuracy(output[k], target_slice[k]) for k in range(len(n_classes))]
+                for k in range(len(n_classes)):
+                    loss_temp = loss[k].cpu().detach().numpy()
+                    top1_temp = acc[k][0].cpu().detach().numpy()
+                    losses[k].update(loss_temp.mean(),images.size(0))
+                    top1[k].update(top1_temp.mean(), images.size(0))
+
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
 
                 if i % self.run_config.print_frequency == 0 or i + 1 == len(data_loader):
-                    if is_test:
-                        prefix = 'Test'
-                    else:
-                        prefix = 'Valid'
-                    test_log = prefix + ': [{0}/{1}]\t'\
-                                        'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'\
-                                        'Loss {loss.val:.4f} ({loss.avg:.4f})\t'\
-                                        'Top-1 acc {top1.val:.3f} ({top1.avg:.3f})'.\
-                        format(i, len(data_loader) - 1, batch_time=batch_time, loss=losses, top1=top1)
-                    if return_top5:
-                        test_log += '\tTop-5 acc {top5.val:.3f} ({top5.avg:.3f})'.format(top5=top5)
-                    print(test_log)
-        if return_top5:
-            return losses.avg, top1.avg, top5.avg
-        else:
-            return losses.avg, top1.avg
+                    for k in range(len(n_classes)):
+                        if is_test:
+                            prefix = 'Test:[{k}]'
+                        else:
+                            prefix = 'Valid:[{k}]'
+                        test_log = prefix + ': [{0}/{1}]\t'\
+                                    'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'\
+                                    'Loss {loss.val:.4f} ({loss.avg:.4f})\t'\
+                                    'Top-1 acc {top1.val:.3f} ({top1.avg:.3f})'.\
+                                    format(i, len(data_loader) - 1, batch_time=batch_time, loss=losses[k], top1=top1[k], k=k)
+        return [(losses[k].avg, top1[k].avg) for k in range(len(n_classes))]
 
     def train_one_epoch(self, adjust_lr_func, train_log_func):
         batch_time = AverageMeter()

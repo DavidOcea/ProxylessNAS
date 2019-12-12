@@ -148,7 +148,6 @@ class ArchSearchRunManager:
     def __init__(self, path, super_net, run_config: RunConfig, arch_search_config: ArchSearchConfig):
         # init weight parameters & build weight_optimizer
         self.run_manager = RunManager(path, super_net, run_config, True)
-
         self.arch_search_config = arch_search_config
 
         # init architecture parameters
@@ -220,15 +219,16 @@ class ArchSearchRunManager:
 
     def validate(self):
         # get performances of current chosen network on validation set
-        self.run_manager.run_config.valid_loader.batch_sampler.batch_size = self.run_manager.run_config.test_batch_size
-        self.run_manager.run_config.valid_loader.batch_sampler.drop_last = False
-
+        n_classes=[td.num_class for td in self.run_manager.run_config.data_provider.train_dataset]
+        for k in range(len(n_classes)):
+            self.run_manager.run_config.valid_loader[k].batch_sampler.batch_size = self.run_manager.run_config.test_batch_size[k]
+            self.run_manager.run_config.valid_loader[k].batch_sampler.drop_last = False
         # set chosen op active
         self.net.set_chosen_op_active()
         # remove unused modules
         self.net.unused_modules_off()
         # test on validation set under train mode
-        valid_res = self.run_manager.validate(is_test=False, use_train_mode=True, return_top5=True)
+        valid_res = self.run_manager.validate(is_test=False, use_train_mode=True)
         # flops of chosen network
         flops = self.run_manager.net_flops()
         # measure latencies of chosen op
@@ -238,75 +238,108 @@ class ArchSearchRunManager:
             latency, _ = self.run_manager.net_latency(
                 l_type=self.arch_search_config.target_hardware, fast=False
             )
-        # unused modules back
+        # unused modules back  valid_res=(losses[k].avg, top1[k].avg)
         self.net.unused_modules_back()
         return valid_res, flops, latency
 
     def warm_up(self, warmup_epochs=25):
         lr_max = 0.05
         data_loader = self.run_manager.run_config.train_loader
-        nBatch = len(data_loader)
+        n_classes=[td.num_class for td in self.run_manager.run_config.data_provider.train_dataset]
+        nBatch = len(data_loader[0])
         T_total = warmup_epochs * nBatch
+        ngpu = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
+        loss_weight = self.run_manager.run_config.loss_weight
 
         for epoch in range(self.warmup_epoch, warmup_epochs):
             print('\n', '-' * 30, 'Warmup epoch: %d' % (epoch + 1), '-' * 30, '\n')
             batch_time = AverageMeter()
             data_time = AverageMeter()
-            losses = AverageMeter()
-            top1 = AverageMeter()
-            top5 = AverageMeter()
+            losses = [AverageMeter() for k in range(len(n_classes))]
+            top1 = [AverageMeter() for k in range(len(n_classes))]
             # switch to train mode
             self.run_manager.net.train()
 
             end = time.time()
-            for i, (images, labels) in enumerate(data_loader):
+            for i,all_in in enumerate(zip(*data_loader)):
                 data_time.update(time.time() - end)
+                inputs, target = zip(*[all_in[k] for k in range(len(n_classes))])
+                slice_pt = 0
+                slice_idx = [0]
+                for l in [p.size(0) for p in inputs]:
+                    slice_pt += l // ngpu
+                    slice_idx.append(slice_pt)
+                organized_input = []
+                organized_target = []
+
+                for ng in range(ngpu):
+                    for t in range(len(inputs)):
+                        bs = self.run_manager.run_config.train_batch_size[t] // ngpu
+                        organized_input.append(inputs[t][ng * bs : (ng + 1) * bs, ...])
+                        organized_target.append(target[t][ng * bs : (ng + 1) * bs, ...])
+
+                inputs = torch.cat(organized_input, dim=0)
+                target = torch.cat(organized_target, dim=0)
+
                 # lr
-                T_cur = epoch * nBatch + i
+                T_cur = epoch * nBatch + i 
                 warmup_lr = 0.5 * lr_max * (1 + math.cos(math.pi * T_cur / T_total))
                 for param_group in self.run_manager.optimizer.param_groups:
                     param_group['lr'] = warmup_lr
-                images, labels = images.to(self.run_manager.device), labels.to(self.run_manager.device)
+                images, labels = inputs.to(self.run_manager.device), target.to(self.run_manager.device)
+
                 # compute output
                 self.net.reset_binary_gates()  # random sample binary gates
                 self.net.unused_modules_off()  # remove unused module for speedup
-                output = self.run_manager.net(images)  # forward (DataParallel)
+                
+                target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
+                output = self.run_manager.net(images, slice_idx)  # forward (DataParallel)
                 # loss
                 if self.run_manager.run_config.label_smoothing > 0:
-                    loss = cross_entropy_with_label_smoothing(
-                        output, labels, self.run_manager.run_config.label_smoothing
-                    )
+                    loss = [cross_entropy_with_label_smoothing(
+                        op, lb, self.run_manager.run_config.label_smoothing
+                    ) for op, lb in zip(output, target_slice)]
                 else:
-                    loss = self.run_manager.criterion(output, labels)
-                # measure accuracy and record loss
-                acc1, acc5 = accuracy(output, labels, topk=(1, 5))
-                losses.update(loss, images.size(0))
-                top1.update(acc1[0], images.size(0))
-                top5.update(acc5[0], images.size(0))
+                    loss = [self.run_manager.criterion(op, lb) for op, lb in zip(output, target_slice)]
+                loss_total = 0.
+                for k in range(len(n_classes)):
+                    loss_total = loss_total + loss[k].mean() * loss_weight[k]
+
+                # measure accuracy and record loss//acc1, acc5, 
+                acc = [accuracy(output[k], target_slice[k]) for k in range(len(n_classes))]
+                for k in range(len(n_classes)):
+                    loss_temp = loss[k].cpu().detach().numpy()
+                    top1_temp = acc[k][0].cpu().detach().numpy()
+                    losses[k].update(loss_temp.mean(),images.size(0))
+                    top1[k].update(top1_temp.mean(), images.size(0))
+              
                 # compute gradient and do SGD step
                 self.run_manager.net.zero_grad()  # zero grads of weight_param, arch_param & binary_param
-                loss.backward()
+                loss_total.backward()
                 self.run_manager.optimizer.step()  # update weight parameters
                 # unused modules back
                 self.net.unused_modules_back()
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
-
                 if i % self.run_manager.run_config.print_frequency == 0 or i + 1 == nBatch:
-                    batch_log = 'Warmup Train [{0}][{1}/{2}]\t' \
+                    for k in range(len(n_classes)):
+                        batch_log = 'Task:[{k}]\t Warmup Train [{0}][{1}/{2}]\t' \
                                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' \
                                 'Data {data_time.val:.3f} ({data_time.avg:.3f})\t' \
                                 'Loss {losses.val:.4f} ({losses.avg:.4f})\t' \
                                 'Top-1 acc {top1.val:.3f} ({top1.avg:.3f})\t' \
-                                'Top-5 acc {top5.val:.3f} ({top5.avg:.3f})\tlr {lr:.5f}'. \
+                                'lr {lr:.5f}'.\
                         format(epoch + 1, i, nBatch - 1, batch_time=batch_time, data_time=data_time,
-                               losses=losses, top1=top1, top5=top5, lr=warmup_lr)
-                    self.run_manager.write_log(batch_log, 'train')
+                               k=k, losses=losses[k], top1=top1[k], lr=warmup_lr)
+                        self.run_manager.write_log(batch_log, 'train')
             valid_res, flops, latency = self.validate()
-            val_log = 'Warmup Valid [{0}/{1}]\tloss {2:.3f}\ttop-1 acc {3:.3f}\ttop-5 acc {4:.3f}\t' \
-                      'Train top-1 {top1.avg:.3f}\ttop-5 {top5.avg:.3f}\tflops: {5:.1f}M'. \
-                format(epoch + 1, warmup_epochs, *valid_res, flops / 1e6, top1=top1, top5=top5)
+
+            for k in range(len(n_classes)):
+                val_log = 'Task:[{k}]\t Warmup Valid [{0}/{1}]\tloss {2:.3f}\ttop-1 acc {3:.3f}\t' \
+                      'Train top-1 {top1.avg:.3f}\tflops: {4:.1f}M'. \
+                format(epoch + 1, warmup_epochs, valid_res[k][0], valid_res[k][1], flops[k] / 1e6, top1=top1[k], k=k)
+            
             if self.arch_search_config.target_hardware not in [None, 'flops']:
                 val_log += '\t' + self.arch_search_config.target_hardware + ': %.3fms' % latency
             self.run_manager.write_log(val_log, 'valid')
@@ -327,9 +360,13 @@ class ArchSearchRunManager:
 
     def train(self, fix_net_weights=False):
         data_loader = self.run_manager.run_config.train_loader
-        nBatch = len(data_loader)
+        nBatch = len(data_loader[0])
+        n_classes=[td.num_class for td in self.run_manager.run_config.data_provider.train_dataset]
+        ngpu = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
+        loss_weight = self.run_manager.run_config.loss_weight
+        self.run_manager.best_acc = [0.0, 0.0]
         if fix_net_weights:
-            data_loader = [(0, 0)] * nBatch
+            data_loader = [[(0, 0)] * nBatch for k in range(len(n_classes))]
 
         arch_param_num = len(list(self.net.architecture_parameters()))
         binary_gates_num = len(list(self.net.binary_gates()))
@@ -345,16 +382,32 @@ class ArchSearchRunManager:
             print('\n', '-' * 30, 'Train epoch: %d' % (epoch + 1), '-' * 30, '\n')
             batch_time = AverageMeter()
             data_time = AverageMeter()
-            losses = AverageMeter()
-            top1 = AverageMeter()
-            top5 = AverageMeter()
+            losses = [AverageMeter() for k in range(len(n_classes))]
+            top1 = [AverageMeter() for k in range(len(n_classes))]
             entropy = AverageMeter()
             # switch to train mode
             self.run_manager.net.train()
 
             end = time.time()
-            for i, (images, labels) in enumerate(data_loader):
+            for i,all_in in enumerate(zip(*data_loader)):
                 data_time.update(time.time() - end)
+                inputs, target = zip(*[all_in[k] for k in range(len(n_classes))])
+                slice_pt = 0
+                slice_idx = [0]
+                for l in [p.size(0) for p in inputs]:
+                    slice_pt += l // ngpu
+                    slice_idx.append(slice_pt)
+                organized_input = []
+                organized_target = []
+
+                for ng in range(ngpu):
+                    for t in range(len(inputs)):
+                        bs = self.run_manager.run_config.train_batch_size[t] // ngpu
+                        organized_input.append(inputs[t][ng * bs : (ng + 1) * bs, ...])
+                        organized_target.append(target[t][ng * bs : (ng + 1) * bs, ...])
+                inputs = torch.cat(organized_input, dim=0)
+                target = torch.cat(organized_target, dim=0)
+
                 # lr
                 lr = self.run_manager.run_config.adjust_learning_rate(
                     self.run_manager.optimizer, epoch, batch=i, nBatch=nBatch
@@ -364,26 +417,34 @@ class ArchSearchRunManager:
                 entropy.update(net_entropy.data.item() / arch_param_num, 1)
                 # train weight parameters if not fix_net_weights
                 if not fix_net_weights:
-                    images, labels = images.to(self.run_manager.device), labels.to(self.run_manager.device)
+                    images, labels = inputs.to(self.run_manager.device), target.to(self.run_manager.device)
                     # compute output
                     self.net.reset_binary_gates()  # random sample binary gates
                     self.net.unused_modules_off()  # remove unused module for speedup
-                    output = self.run_manager.net(images)  # forward (DataParallel)
+                    target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
+                    output = self.run_manager.net(images, slice_idx)  # forward (DataParallel)
                     # loss
                     if self.run_manager.run_config.label_smoothing > 0:
-                        loss = cross_entropy_with_label_smoothing(
-                            output, labels, self.run_manager.run_config.label_smoothing
-                        )
+                        loss = [cross_entropy_with_label_smoothing(
+                            op, lb, self.run_manager.run_config.label_smoothing
+                        ) for op, lb in zip(output, target_slice)]
                     else:
-                        loss = self.run_manager.criterion(output, labels)
+                        loss = [self.run_manager.criterion(op, lb) for op, lb in zip(output, target_slice)]
+                    loss_total = 0.
+                    for k in range(len(n_classes)):
+                        loss_total = loss_total + loss[k].mean() * loss_weight[k]
+
                     # measure accuracy and record loss
-                    acc1, acc5 = accuracy(output, labels, topk=(1, 5))
-                    losses.update(loss, images.size(0))
-                    top1.update(acc1[0], images.size(0))
-                    top5.update(acc5[0], images.size(0))
+                    acc = [accuracy(output[k], target_slice[k]) for k in range(len(n_classes))]
+                    for k in range(len(n_classes)):
+                        loss_temp = loss[k].cpu().detach().numpy()
+                        top1_temp = acc[k][0].cpu().detach().numpy()
+                        losses[k].update(loss_temp.mean(),images.size(0))
+                        top1[k].update(top1_temp.mean(), images.size(0))
+
                     # compute gradient and do SGD step
                     self.run_manager.net.zero_grad()  # zero grads of weight_param, arch_param & binary_param
-                    loss.backward()
+                    loss_total.backward()
                     self.run_manager.optimizer.step()  # update weight parameters
                     # unused modules back
                     self.net.unused_modules_back()
@@ -413,17 +474,19 @@ class ArchSearchRunManager:
                 end = time.time()
                 # training log
                 if i % self.run_manager.run_config.print_frequency == 0 or i + 1 == nBatch:
-                    batch_log = 'Train [{0}][{1}/{2}]\t' \
+                    for k in range(len(n_classes)):
+                        batch_log = 'Task:[{k}] Train [{0}][{1}/{2}]\t' \
                                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t' \
                                 'Data Time {data_time.val:.3f} ({data_time.avg:.3f})\t' \
                                 'Loss {losses.val:.4f} ({losses.avg:.4f})\t' \
                                 'Entropy {entropy.val:.5f} ({entropy.avg:.5f})\t' \
                                 'Top-1 acc {top1.val:.3f} ({top1.avg:.3f})\t' \
-                                'Top-5 acc {top5.val:.3f} ({top5.avg:.3f})\tlr {lr:.5f}'. \
+                                'lr {lr:.5f}'. \
                         format(epoch + 1, i, nBatch - 1, batch_time=batch_time, data_time=data_time,
-                               losses=losses, entropy=entropy, top1=top1, top5=top5, lr=lr)
-                    self.run_manager.write_log(batch_log, 'train')
-
+                               losses=losses[k], entropy=entropy, top1=top1[k], lr=lr, k=k)
+                        self.run_manager.write_log(batch_log, 'train')
+                break
+                   
             # print current network architecture
             self.write_log('-' * 30 + 'Current Architecture [%d]' % (epoch + 1) + '-' * 30, prefix='arch')
             for idx, block in enumerate(self.net.blocks):
@@ -432,16 +495,18 @@ class ArchSearchRunManager:
 
             # validate
             if (epoch + 1) % self.run_manager.run_config.validation_frequency == 0:
-                (val_loss, val_top1, val_top5), flops, latency = self.validate()
-                self.run_manager.best_acc = max(self.run_manager.best_acc, val_top1)
-                val_log = 'Valid [{0}/{1}]\tloss {2:.3f}\ttop-1 acc {3:.3f} ({4:.3f})\ttop-5 acc {5:.3f}\t' \
-                          'Train top-1 {top1.avg:.3f}\ttop-5 {top5.avg:.3f}\t' \
+                valid_res, flops, latency = self.validate()
+                self.run_manager.best_acc = [max(self.run_manager.best_acc[k], valid_res[k][1]) for k in range(len(n_classes))]
+                for k in range(len(n_classes)):
+                    val_log = 'Task:[{k}] Valid [{0}/{1}]\tloss {2:.3f}\ttop-1 acc {3:.3f} ({4:.3f})\t' \
+                          'Train top-1 {top1.avg:.3f}\t' \
                           'Entropy {entropy.val:.5f}\t' \
-                          'Latency-{6}: {7:.3f}ms\tFlops: {8:.2f}M'. \
-                    format(epoch + 1, self.run_manager.run_config.n_epochs, val_loss, val_top1,
-                           self.run_manager.best_acc, val_top5, self.arch_search_config.target_hardware,
-                           latency, flops / 1e6, entropy=entropy, top1=top1, top5=top5)
-                self.run_manager.write_log(val_log, 'valid')
+                          'Latency-{5}: {6:.3f}ms\tFlops: {7:.2f}M'. \
+                    format(epoch + 1, self.run_manager.run_config.n_epochs, valid_res[k][0], valid_res[k][1],
+                           self.run_manager.best_acc[k], self.arch_search_config.target_hardware,
+                           latency, flops[k] / 1e6, entropy=entropy, top1=top1[k], k=k)
+                    self.run_manager.write_log(val_log, 'valid')
+                               
             # save model
             self.run_manager.save_model({
                 'warmup': False,

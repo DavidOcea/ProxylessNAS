@@ -19,12 +19,12 @@ class ImagenetRunConfig(RunConfig):
                  dataset='imagenet', train_batch_size=256, test_batch_size=500, valid_size=None,
                  opt_type='sgd', opt_param=None, weight_decay=4e-5, label_smoothing=0.1, no_decay_keys='bn',
                  model_init='he_fout', init_div_groups=False, validation_frequency=1, print_frequency=10,
-                 n_worker=32, resize_scale=0.08, distort_color='normal', **kwargs):
+                 n_worker=32, resize_scale=0.08, distort_color='normal', loss_weight=1.0, **kwargs):
         super(ImagenetRunConfig, self).__init__(
             n_epochs, init_lr, lr_schedule_type, lr_schedule_param,
             dataset, train_batch_size, test_batch_size, valid_size,
             opt_type, opt_param, weight_decay, label_smoothing, no_decay_keys,
-            model_init, init_div_groups, validation_frequency, print_frequency
+            model_init, init_div_groups, validation_frequency, print_frequency, loss_weight
         )
 
         self.n_worker = n_worker

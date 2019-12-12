@@ -23,7 +23,9 @@ ref_values = {
         '1.00': 80,
     },
     'cpu': {},
-    'gpu8': {},
+    'gpu8': {
+        '1.00': 8,
+    },
 }
 
 parser = argparse.ArgumentParser()
@@ -39,10 +41,10 @@ parser.add_argument('--init_lr', type=float, default=0.025)
 parser.add_argument('--lr_schedule_type', type=str, default='cosine')
 # lr_schedule_param
 
-parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet'])
-parser.add_argument('--train_batch_size', type=int, default=256)
-parser.add_argument('--test_batch_size', type=int, default=1000)
-parser.add_argument('--valid_size', type=int, default=50000)
+parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet','wm_data'])
+parser.add_argument('--train_batch_size', nargs='+', type=int, default=128)
+parser.add_argument('--test_batch_size', nargs='+', type=int, default=128)
+parser.add_argument('--valid_size', nargs='+', type=int, default=128)
 
 parser.add_argument('--opt_type', type=str, default='sgd', choices=['sgd'])
 parser.add_argument('--momentum', type=float, default=0.9)  # opt_param
@@ -57,8 +59,10 @@ parser.add_argument('--validation_frequency', type=int, default=1)
 parser.add_argument('--print_frequency', type=int, default=10)
 
 parser.add_argument('--n_worker', type=int, default=32)
-parser.add_argument('--resize_scale', type=float, default=0.08)
+parser.add_argument('--resize_scale', type=float, default=0.7)
 parser.add_argument('--distort_color', type=str, default='normal', choices=['normal', 'strong', 'None'])
+
+parser.add_argument('--loss_weight', nargs='+', type=float, default=1.0)
 
 """ net config """
 parser.add_argument('--width_stages', type=str, default='24,40,80,96,192,320')
@@ -140,7 +144,7 @@ if __name__ == '__main__':
     ]
     super_net = SuperProxylessNASNets(
         width_stages=args.width_stages, n_cell_stages=args.n_cell_stages, stride_stages=args.stride_stages,
-        conv_candidates=args.conv_candidates, n_classes=run_config.data_provider.n_classes, width_mult=args.width_mult,
+        conv_candidates=args.conv_candidates, n_classes=[td.num_class for td in run_config.data_provider.train_dataset], width_mult=args.width_mult,
         bn_param=(args.bn_momentum, args.bn_eps), dropout_rate=args.dropout
     )
 

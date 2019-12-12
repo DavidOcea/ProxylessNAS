@@ -80,14 +80,17 @@ class ProxylessNASNets(MyNetwork):
         self.global_avg_pooling = nn.AdaptiveAvgPool2d(1)
         self.classifier = classifier
 
-    def forward(self, x):
+    def forward(self, x, slice_idx=[0, 128, 256, 384], eval_mode=False):
         x = self.first_conv(x)
         for block in self.blocks:
             x = block(x)
         x = self.feature_mix_layer(x)
         x = self.global_avg_pooling(x)
         x = x.view(x.size(0), -1)  # flatten
-        x = self.classifier(x)
+        if eval_mode:
+            x = [self.classifier[k](x) for k in range(len(self.classifier))] 
+        else:
+            x = [self.classifier[k](x[slice_idx[k]:slice_idx[k+1], ...]) for k in range(len(self.classifier))]
         return x
 
     @property
@@ -107,7 +110,7 @@ class ProxylessNASNets(MyNetwork):
                 block.config for block in self.blocks
             ],
             'feature_mix_layer': self.feature_mix_layer.config,
-            'classifier': self.classifier.config,
+            'classifier': [self.classifier[k].config for k in range(len(self.classifier))],
         }
 
     @staticmethod
@@ -140,6 +143,7 @@ class ProxylessNASNets(MyNetwork):
         x = self.global_avg_pooling(x)
         x = x.view(x.size(0), -1)  # flatten
 
-        delta_flop, x = self.classifier.get_flops(x)
-        flop += delta_flop
-        return flop, x
+        delta_flop_x = [self.classifier[k].get_flops(x) for k in range(len(self.classifier))]
+        flop = [flop + delta_flop_x[k][0] for k in range(len(delta_flop_x))]
+
+        return flop, [delta_flop_x[k][1] for k in range(len(delta_flop_x))]

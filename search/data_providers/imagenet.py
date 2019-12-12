@@ -78,7 +78,7 @@ class ImagenetDataProvider(DataProvider):
     @property
     def save_path(self):
         if self._save_path is None:
-            self._save_path = '/dataset/imagenet'
+            self._save_path = '/home/testuser/data2/yangdecheng/data/WM_data_20191113'
         return self._save_path
 
     @property
@@ -102,7 +102,7 @@ class ImagenetDataProvider(DataProvider):
         if distort_color == 'strong':
             color_transform = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)
         elif distort_color == 'normal':
-            color_transform = transforms.ColorJitter(brightness=32. / 255., saturation=0.5)
+            color_transform = transforms.ColorJitter(brightness=[0.5,1.5], contrast=[0.5,1.5], saturation=[0.5,1.5], hue= 0)
         else:
             color_transform = None
         if color_transform is None:
@@ -124,8 +124,8 @@ class ImagenetDataProvider(DataProvider):
 
     @property
     def resize_value(self):
-        return 256
+        return 128
 
     @property
     def image_size(self):
-        return 224
+        return 112
