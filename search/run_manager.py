@@ -88,6 +88,9 @@ class RunConfig:
             if self.dataset == 'imagenet':
                 from data_providers.imagenet import ImagenetDataProvider
                 self._data_provider = ImagenetDataProvider(**self.data_config)
+            elif self.dataset == 'wm_data':
+                from data_providers.wm_data import ImagenetDataProvider
+                self._data_provider = ImagenetDataProvider(**self.data_config)
             else:
                 raise ValueError('do not support: %s' % self.dataset)
         return self._data_provider
