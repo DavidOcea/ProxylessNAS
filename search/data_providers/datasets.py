@@ -329,7 +329,6 @@ class GivenSizeSampler(Sampler):
             indices += origin_indices[:intake]
             extra -= intake
         assert len(indices) == self.total_size, "{} vs {}".format(len(indices), self.total_size)
-
         return iter(indices)
 
     def __len__(self):

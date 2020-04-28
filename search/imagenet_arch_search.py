@@ -24,7 +24,8 @@ ref_values = {
     },
     'cpu': {},
     'gpu8': {
-        '1.00': 8,
+        '2.00': 80,
+        '1.50': 12,
     },
 }
 
@@ -36,7 +37,7 @@ parser.add_argument('--debug', help='freeze the weight parameters', action='stor
 parser.add_argument('--manual_seed', default=0, type=int)
 
 """ run config """
-parser.add_argument('--n_epochs', type=int, default=120)
+parser.add_argument('--n_epochs', type=int, default=400)  #140
 parser.add_argument('--init_lr', type=float, default=0.025)
 parser.add_argument('--lr_schedule_type', type=str, default='cosine')
 # lr_schedule_param
@@ -68,7 +69,7 @@ parser.add_argument('--loss_weight', nargs='+', type=float, default=1.0)
 parser.add_argument('--width_stages', type=str, default='24,40,80,96,192,320')
 parser.add_argument('--n_cell_stages', type=str, default='4,4,4,4,4,1')
 parser.add_argument('--stride_stages', type=str, default='2,2,2,1,2,1')
-parser.add_argument('--width_mult', type=float, default=1.0)
+parser.add_argument('--width_mult', type=float, default=1.0) #2.0
 parser.add_argument('--bn_momentum', type=float, default=0.1)
 parser.add_argument('--bn_eps', type=float, default=1e-3)
 parser.add_argument('--dropout', type=float, default=0)
@@ -76,7 +77,7 @@ parser.add_argument('--dropout', type=float, default=0)
 # architecture search config
 """ arch search algo and warmup """
 parser.add_argument('--arch_algo', type=str, default='grad', choices=['grad', 'rl'])
-parser.add_argument('--warmup_epochs', type=int, default=40)
+parser.add_argument('--warmup_epochs', type=int, default=80) #40
 """ shared hyper-parameters """
 parser.add_argument('--arch_init_type', type=str, default='normal', choices=['normal', 'uniform'])
 parser.add_argument('--arch_init_ratio', type=float, default=1e-3)
@@ -99,10 +100,9 @@ parser.add_argument('--grad_reg_loss_beta', type=float, default=0.3)  # grad_reg
 """ RL hyper-parameters """
 parser.add_argument('--rl_batch_size', type=int, default=10)
 parser.add_argument('--rl_update_per_epoch', action='store_true')
-parser.add_argument('--rl_update_steps_per_epoch', type=int, default=300)
+parser.add_argument('--rl_update_steps_per_epoch', type=int, default=60)
 parser.add_argument('--rl_baseline_decay_weight', type=float, default=0.99)
 parser.add_argument('--rl_tradeoff_ratio', type=float, default=0.1)
-
 
 if __name__ == '__main__':
     args = parser.parse_args()
@@ -138,9 +138,9 @@ if __name__ == '__main__':
     args.n_cell_stages = [int(val) for val in args.n_cell_stages.split(',')]
     args.stride_stages = [int(val) for val in args.stride_stages.split(',')]
     args.conv_candidates = [
-        '3x3_MBConv3', '3x3_MBConv6',
-        '5x5_MBConv3', '5x5_MBConv6',
-        '7x7_MBConv3', '7x7_MBConv6',
+        '3x3_MBConv3', '3x3_MBConv6', 
+        '5x5_MBConv3', '5x5_MBConv6', 
+        '7x7_MBConv3', '7x7_MBConv6'
     ]
     super_net = SuperProxylessNASNets(
         width_stages=args.width_stages, n_cell_stages=args.n_cell_stages, stride_stages=args.stride_stages,
@@ -187,6 +187,12 @@ if __name__ == '__main__':
 
     # arch search run manager
     arch_search_run_manager = ArchSearchRunManager(args.path, super_net, run_config, arch_search_config)
+
+    # import pdb
+    # pdb.set_trace()
+    # from torchsummary import summary
+    # summary(super_net, (3, 112, 112))
+    # pdb.set_trace()
 
     # resume
     if args.resume:

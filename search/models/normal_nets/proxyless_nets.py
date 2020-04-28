@@ -80,18 +80,27 @@ class ProxylessNASNets(MyNetwork):
         self.global_avg_pooling = nn.AdaptiveAvgPool2d(1)
         self.classifier = classifier
 
-    def forward(self, x, slice_idx=[0, 128, 256, 384], eval_mode=False):
+    def forward(self, x, labels=None, slice_idx=None, eval_mode=False):
         x = self.first_conv(x)
         for block in self.blocks:
             x = block(x)
         x = self.feature_mix_layer(x)
         x = self.global_avg_pooling(x)
         x = x.view(x.size(0), -1)  # flatten
+        if labels is not None:
+            target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(self.classifier))]        
         if eval_mode:
             x = [self.classifier[k](x) for k in range(len(self.classifier))] 
         else:
-            x = [self.classifier[k](x[slice_idx[k]:slice_idx[k+1], ...]) for k in range(len(self.classifier))]
-        return x
+            if slice_idx is not None:
+                x = [self.classifier[k](x[slice_idx[k]:slice_idx[k+1], ...]) for k in range(len(self.classifier))]
+            else:
+                x = [self.classifier[k](x) for k in range(len(self.classifier))] 
+        if labels is not None:
+            return x, target_slice
+        else:
+            return x
+        
 
     @property
     def module_str(self):
@@ -127,7 +136,6 @@ class ProxylessNASNets(MyNetwork):
             net.set_bn_param(**config['bn'])
         else:
             net.set_bn_param(momentum=0.1, eps=1e-3)
-
         return net
 
     def get_flops(self, x):

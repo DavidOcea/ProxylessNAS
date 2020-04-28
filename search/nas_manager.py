@@ -127,12 +127,14 @@ class RLArchSearchConfig(ArchSearchConfig):
                 schedule[j - 1] = 1
         return schedule
 
-    def calculate_reward(self, net_info):
-        acc = net_info['acc'] / 100
+    def calculate_reward(self, net_info, n_classes):
+        acc = []
+        for k in range(len(n_classes)):
+            acc.append(net_info['acc_T'+str(k)] / 100)
         if self.target_hardware is None:
-            return acc
+            return [acc[k] for k in range(len(n_classes))]
         else:
-            return acc * ((self.ref_value / net_info[self.target_hardware]) ** self.tradeoff_ratio)
+            return [acc[k] * ((self.ref_value / net_info[self.target_hardware]) ** self.tradeoff_ratio) for k in range(len(n_classes))]
 
     @property
     def baseline(self):
@@ -291,9 +293,8 @@ class ArchSearchRunManager:
                 # compute output
                 self.net.reset_binary_gates()  # random sample binary gates
                 self.net.unused_modules_off()  # remove unused module for speedup
-                
-                target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
-                output = self.run_manager.net(images, slice_idx)  # forward (DataParallel)
+                output, target_slice = self.run_manager.net(images, labels, slice_idx)  # forward (DataParallel)
+
                 # loss
                 if self.run_manager.run_config.label_smoothing > 0:
                     loss = [cross_entropy_with_label_smoothing(
@@ -339,10 +340,9 @@ class ArchSearchRunManager:
                 val_log = 'Task:[{k}]\t Warmup Valid [{0}/{1}]\tloss {2:.3f}\ttop-1 acc {3:.3f}\t' \
                       'Train top-1 {top1.avg:.3f}\tflops: {4:.1f}M'. \
                 format(epoch + 1, warmup_epochs, valid_res[k][0], valid_res[k][1], flops[k] / 1e6, top1=top1[k], k=k)
-            
-            if self.arch_search_config.target_hardware not in [None, 'flops']:
-                val_log += '\t' + self.arch_search_config.target_hardware + ': %.3fms' % latency
-            self.run_manager.write_log(val_log, 'valid')
+                if self.arch_search_config.target_hardware not in [None, 'flops']:
+                    val_log += '\t' + self.arch_search_config.target_hardware + ': %.3fms' % latency
+                self.run_manager.write_log(val_log, 'valid')           
             self.warmup = epoch + 1 < warmup_epochs
 
             state_dict = self.net.state_dict()
@@ -364,7 +364,7 @@ class ArchSearchRunManager:
         n_classes=[td.num_class for td in self.run_manager.run_config.data_provider.train_dataset]
         ngpu = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
         loss_weight = self.run_manager.run_config.loss_weight
-        self.run_manager.best_acc = [0.0, 0.0]
+        self.run_manager.best_acc = [0.0 for k in range(len(n_classes))]
         if fix_net_weights:
             data_loader = [[(0, 0)] * nBatch for k in range(len(n_classes))]
 
@@ -421,8 +421,7 @@ class ArchSearchRunManager:
                     # compute output
                     self.net.reset_binary_gates()  # random sample binary gates
                     self.net.unused_modules_off()  # remove unused module for speedup
-                    target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
-                    output = self.run_manager.net(images, slice_idx)  # forward (DataParallel)
+                    output, target_slice = self.run_manager.net(images, labels, slice_idx)  # forward (DataParallel)
                     # loss
                     if self.run_manager.run_config.label_smoothing > 0:
                         loss = [cross_entropy_with_label_smoothing(
@@ -456,10 +455,16 @@ class ArchSearchRunManager:
                         if isinstance(self.arch_search_config, RLArchSearchConfig):
                             reward_list, net_info_list = self.rl_update_step(fast=True)
                             used_time = time.time() - start_time
-                            log_str = 'REINFORCE [%d-%d]\tTime %.4f\tMean Reward %.4f\t%s' % (
-                                epoch + 1, i, used_time, sum(reward_list) / len(reward_list), net_info_list
-                            )
-                            self.write_log(log_str, prefix='rl', should_print=False)
+                            import numpy as np
+                            all_reward = np.array([0 for k in range(len(n_classes))])
+                            for tem_reward in reward_list:
+                                tem_reward = np.array(tem_reward)
+                                all_reward = all_reward + tem_reward
+                            for k in range(len(n_classes)):
+                                log_str = 'Task:[{k}] REINFORCE [{0:d}-{1:d}]\tTime {2:.4f}\tMean Reward {3:.4f}\t{4}'.format(
+                                epoch + 1, i, used_time, all_reward[k] / len(reward_list), net_info_list, k=k
+                                )    
+                                self.write_log(log_str, prefix='rl', should_print=False)
                         elif isinstance(self.arch_search_config, GradientArchSearchConfig):
                             arch_loss, exp_value = self.gradient_step()
                             used_time = time.time() - start_time
@@ -485,7 +490,6 @@ class ArchSearchRunManager:
                         format(epoch + 1, i, nBatch - 1, batch_time=batch_time, data_time=data_time,
                                losses=losses[k], entropy=entropy, top1=top1[k], lr=lr, k=k)
                         self.run_manager.write_log(batch_log, 'train')
-                break
                    
             # print current network architecture
             self.write_log('-' * 30 + 'Current Architecture [%d]' % (epoch + 1) + '-' * 30, prefix='arch')
@@ -532,26 +536,48 @@ class ArchSearchRunManager:
 
     def rl_update_step(self, fast=True):
         assert isinstance(self.arch_search_config, RLArchSearchConfig)
+        n_classes=[td.num_class for td in self.run_manager.run_config.data_provider.train_dataset]
+        ngpu = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
         # prepare data
-        self.run_manager.run_config.valid_loader.batch_sampler.batch_size = self.run_manager.run_config.test_batch_size
-        self.run_manager.run_config.valid_loader.batch_sampler.drop_last = True
+        for k in range(len(n_classes)):
+            self.run_manager.run_config.valid_loader[k].batch_sampler.batch_size = self.run_manager.run_config.test_batch_size
+            self.run_manager.run_config.valid_loader[k].batch_sampler.drop_last = True
+        
         # switch to train mode
         self.run_manager.net.train()
         # sample a batch of data from validation set
-        images, labels = self.run_manager.run_config.valid_next_batch
-        images, labels = images.to(self.run_manager.device), labels.to(self.run_manager.device)
+        valid_next = self.run_manager.run_config.valid_next_batch
+        inputs, target = zip(*[valid_next[k] for k in range(len(n_classes))])
+        slice_pt = 0
+        slice_idx = [0]
+        for l in [p.size(0) for p in inputs]:
+            slice_pt += l // ngpu
+            slice_idx.append(slice_pt)
+        organized_input = []
+        organized_target = []
+        for ng in range(ngpu):
+            for t in range(len(inputs)):
+                bs = self.run_manager.run_config.train_batch_size[t] // ngpu
+                organized_input.append(inputs[t][ng * bs : (ng + 1) * bs, ...])
+                organized_target.append(target[t][ng * bs : (ng + 1) * bs, ...])
+        inputs = torch.cat(organized_input, dim=0)
+        target = torch.cat(organized_target, dim=0)
+        images, labels = inputs.to(self.run_manager.device), target.to(self.run_manager.device)
+
         # sample nets and get their validation accuracy, latency, etc
         grad_buffer = []
         reward_buffer = []
         net_info_buffer = []
+        net_info = {}
         for i in range(self.arch_search_config.batch_size):
             self.net.reset_binary_gates()  # random sample binary gates
             self.net.unused_modules_off()  # remove unused module for speedup
             # validate the sampled network
             with torch.no_grad():
-                output = self.run_manager.net(images)
-                acc1, acc5 = accuracy(output, labels, topk=(1, 5))
-            net_info = {'acc': acc1[0].item()}
+                output, target_slice = self.run_manager.net(images, labels, slice_idx)  # forward (DataParallel)
+                acc = [accuracy(output[k], target_slice[k]) for k in range(len(n_classes))]
+            for k in range(len(n_classes)):
+                net_info['acc_T'+str(k)] = acc[k][0].item()
             # get additional net info for calculating the reward
             if self.arch_search_config.target_hardware is None:
                 pass
@@ -563,7 +589,7 @@ class ArchSearchRunManager:
                 )
             net_info_buffer.append(net_info)
             # calculate reward according to net_info
-            reward = self.arch_search_config.calculate_reward(net_info)
+            reward = self.arch_search_config.calculate_reward(net_info, n_classes)
             # loss term
             obj_term = 0
             for m in self.net.redundant_modules:
@@ -582,9 +608,14 @@ class ArchSearchRunManager:
             # unused modules back
             self.net.unused_modules_back()
         # update baseline function
-        avg_reward = sum(reward_buffer) / self.arch_search_config.batch_size
+        import numpy as np
+        all_reward = np.array([0 for k in range(len(n_classes))])
+        for tem_reward in reward_buffer:
+            tem_reward = np.array(tem_reward)
+            all_reward = all_reward + tem_reward
+        avg_reward = [all_reward[k] / self.arch_search_config.batch_size for k in range(len(n_classes))]
         if self.arch_search_config.baseline is None:
-            self.arch_search_config.baseline = avg_reward
+            self.arch_search_config.baseline = np.array(avg_reward)
         else:
             self.arch_search_config.baseline += self.arch_search_config.baseline_decay_weight * \
                                                 (avg_reward - self.arch_search_config.baseline)
@@ -592,7 +623,7 @@ class ArchSearchRunManager:
         for idx, m in enumerate(self.net.redundant_modules):
             m.AP_path_alpha.grad.data.zero_()
             for j in range(self.arch_search_config.batch_size):
-                m.AP_path_alpha.grad.data += (reward_buffer[j] - self.arch_search_config.baseline) * grad_buffer[j][idx]
+                m.AP_path_alpha.grad.data += sum(torch.from_numpy(np.array(reward_buffer[j]) - self.arch_search_config.baseline)) * grad_buffer[j][idx]
             m.AP_path_alpha.grad.data /= self.arch_search_config.batch_size
         # apply gradients
         self.arch_optimizer.step()

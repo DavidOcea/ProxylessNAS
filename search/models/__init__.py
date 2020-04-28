@@ -30,7 +30,7 @@ class ImagenetRunConfig(RunConfig):
         self.n_worker = n_worker
         self.resize_scale = resize_scale
         self.distort_color = distort_color
-
+        
         print(kwargs.keys())
 
     @property

@@ -116,33 +116,33 @@ class RunConfig:
     @property
     def train_next_batch(self):
         if self._train_iter is None:
-            self._train_iter = iter(self.train_loader)
+            self._train_iter = iter(zip(*self.train_loader))
         try:
             data = next(self._train_iter)
         except StopIteration:
-            self._train_iter = iter(self.train_loader)
+            self._train_iter = iter(zip(*self.train_loader))
             data = next(self._train_iter)
         return data
 
     @property
     def valid_next_batch(self):
         if self._valid_iter is None:
-            self._valid_iter = iter(self.valid_loader)
+            self._valid_iter = iter(zip(*self.test_loader))
         try:
             data = next(self._valid_iter)
         except StopIteration:
-            self._valid_iter = iter(self.valid_loader)
+            self._valid_iter = iter(zip(*self.test_loader))
             data = next(self._valid_iter)
         return data
 
     @property
     def test_next_batch(self):
         if self._test_iter is None:
-            self._test_iter = iter(self.test_loader)
+            self._test_iter = iter(zip(*self.test_loader))
         try:
             data = next(self._test_iter)
         except StopIteration:
-            self._test_iter = iter(self.test_loader)
+            self._test_iter = iter(zip(*self.test_loader))
             data = next(self._test_iter)
         return data
 
@@ -163,7 +163,6 @@ class RunConfig:
         else:
             raise NotImplementedError
         return optimizer
-
 
 class RunManager:
 
@@ -230,7 +229,6 @@ class RunManager:
     # noinspection PyUnresolvedReferences
     def net_flops(self):
         data_shape = [1] + list(self.run_config.data_provider.data_shape)
-
         if isinstance(self.net, nn.DataParallel):
             net = self.net.module
         else:
@@ -500,10 +498,9 @@ class RunManager:
                 inputs = torch.cat(organized_input, dim=0)
                 target = torch.cat(organized_target, dim=0)
                 images, labels = inputs.to(self.device), target.to(self.device)
-                target_slice = [labels[slice_idx[k]:slice_idx[k+1]] for k in range(len(n_classes))]
 
                 # compute output
-                output = net(images, slice_idx)
+                output, target_slice = net(images, labels, slice_idx)  # forward (DataParallel)
                 loss = [self.criterion(op, lb) for op, lb in zip(output, target_slice)]
                 # measure accuracy and record loss
                 acc = [accuracy(output[k], target_slice[k]) for k in range(len(n_classes))]

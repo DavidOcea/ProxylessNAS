@@ -106,7 +106,6 @@ class SuperProxylessNASNets(ProxylessNASNets):
                 yield param
 
     """ architecture parameters related methods """
-
     @property
     def redundant_modules(self):
         if self._redundant_modules is None:

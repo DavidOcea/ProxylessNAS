@@ -12,7 +12,6 @@ from .transforms import RandomResizedCrop, Compose, Resize, CenterCrop, ToTensor
 import numpy as np
 
 class ImagenetDataProvider(DataProvider):
-
     def __init__(self, save_path=None, train_batch_size=256, test_batch_size=512, valid_size=None,
                  n_worker=32, resize_scale=0.08, distort_color=None):
 
@@ -22,16 +21,6 @@ class ImagenetDataProvider(DataProvider):
         self.train_dataset = [FileListLabeledDataset(self.train_list[i], self.train_path[i], train_transforms) for i in range(num_tasks)]
 
         if valid_size is not None:
-            # if isinstance(valid_size, float):
-            #     valid_size = int(valid_size * len(train_dataset))
-            # else:
-            #     assert isinstance(valid_size, int), 'invalid valid_size: %s' % valid_size
-            # train_indexes, valid_indexes = self.random_sample_valid_set(
-            #     [cls for _, cls in train_dataset.samples], valid_size, self.n_classes,
-            # )
-            # train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_indexes)
-            # valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(valid_indexes)
-
             self.valid_dataset = [FileListLabeledDataset(self.valid_list[i], self.valid_path[i], Compose([
                 Resize(self.resize_value),
                 CenterCrop(self.image_size),
@@ -46,17 +35,17 @@ class ImagenetDataProvider(DataProvider):
 
             self.train = [torch.utils.data.DataLoader(
                 self.train_dataset[i], batch_size=train_batch_size[i], sampler=train_sampler[i],
-                num_workers=n_worker, pin_memory=True,
+                num_workers=n_worker, pin_memory=False,
             ) for i in range(num_tasks)]
             self.valid = [torch.utils.data.DataLoader(
                 self.valid_dataset[i], batch_size=valid_size[i], sampler=valid_sampler[i],
-                num_workers=n_worker, pin_memory=True,
+                num_workers=n_worker, pin_memory=False,
             ) for i in range(num_tasks)]
         else:
-            self.train = torch.utils.data.DataLoader(
-                self.train_dataset, batch_size=train_batch_size, shuffle=True,
-                num_workers=n_worker, pin_memory=True,
-            )
+            self.train = [torch.utils.data.DataLoader(
+                self.train_dataset[i], batch_size=train_batch_size[i], sampler=train_sampler[i],
+                num_workers=n_worker, pin_memory=False,
+            ) for i in range(num_tasks)]
             self.valid = None
 
         self.test_dataset = [FileListLabeledDataset(self.valid_list[i], self.valid_path[i], Compose([
@@ -70,7 +59,7 @@ class ImagenetDataProvider(DataProvider):
         test_sampler = [GivenSizeSampler(td, total_size=test_longest_size * bs, rand_seed=0) for td, bs in zip(self.test_dataset, test_batch_size)]
 
         self.test = [torch.utils.data.DataLoader(
-            self.test_dataset[i], batch_size=test_batch_size[i], sampler=test_sampler[i], shuffle=False, num_workers=n_worker, pin_memory=True,
+            self.test_dataset[i], batch_size=test_batch_size[i], sampler=test_sampler[i], shuffle=False, num_workers=n_worker, pin_memory=False,
         ) for i in range(num_tasks)]
 
         if self.valid is None:
@@ -91,7 +80,11 @@ class ImagenetDataProvider(DataProvider):
     @property
     def save_path(self):
         if self._save_path is None:
-            self._save_path = ['/home/testuser/data2/yangdecheng/data/VD_data_20190907','/home/testuser/data2/yangdecheng/data/WM_data_20191113']
+            self._save_path = ['/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/CX_0326',\
+                                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TK_0326',\
+                                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/ZR_0326',\
+                                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TX_0326',\
+                                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/WM_0326'] #WM_data_20191113
         return self._save_path
 
     @property
@@ -104,7 +97,11 @@ class ImagenetDataProvider(DataProvider):
 
     @property
     def train_list(self):
-        return ['/home/testuser/data2/yangdecheng/work/multi_task/code/data/VD20190907_train.txt','/home/testuser/data2/yangdecheng/work/multi_task/code/data/WM20191113_val.txt']
+        return ['/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/CX_0326/txt/cx_train.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TK_0326/txt/tk_train.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/ZR_0326/txt/zr_train.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TX_0326/txt/tx_train.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/WM_0326/txt/wm_train.txt'] 
 
     @property
     def valid_path(self):
@@ -112,7 +109,11 @@ class ImagenetDataProvider(DataProvider):
     
     @property
     def valid_list(self):
-        return ['/home/testuser/data2/yangdecheng/work/multi_task/code/data/VD20190907_val.txt','/home/testuser/data2/yangdecheng/work/multi_task/code/data/WM20191113_val.txt']
+        return ['/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/CX_0304/txt/cx_val.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TK_0304/txt/tk_val.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/ZR_0304/txt/zr_val.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/TX_0304/txt/tx_val.txt',\
+                '/home/testuser/data2/yangdecheng/data/TR-NMA-0304-nas/WM_0305/txt/wm_val.txt']
 
     @property
     def normalize(self):
