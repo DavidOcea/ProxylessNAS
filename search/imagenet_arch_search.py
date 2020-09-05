@@ -23,7 +23,9 @@ ref_values = {
         '1.00': 80,
     },
     'cpu': {},
-    'gpu8': {},
+    'gpu8': {
+        '1.00': 30,
+    },
 }
 
 parser = argparse.ArgumentParser()
@@ -39,7 +41,7 @@ parser.add_argument('--init_lr', type=float, default=0.025)
 parser.add_argument('--lr_schedule_type', type=str, default='cosine')
 # lr_schedule_param
 
-parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet'])
+parser.add_argument('--dataset', type=str, default='imagenet', choices=['imagenet','wm_data'])
 parser.add_argument('--train_batch_size', type=int, default=256)
 parser.add_argument('--test_batch_size', type=int, default=1000)
 parser.add_argument('--valid_size', type=int, default=50000)
